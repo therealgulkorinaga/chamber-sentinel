@@ -4,8 +4,6 @@
 
 **Arko Ganguli**
 
-*Revised after peer review*
-
 ---
 
 ## Abstract
