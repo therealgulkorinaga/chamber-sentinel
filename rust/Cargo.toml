@@ -1,0 +1,44 @@
+[workspace]
+members = [
+    "chamber-core",
+    "chamber-types",
+    "chamber-crypto",
+    "chamber-state",
+    "chamber-burn",
+    "chamber-policy",
+    "chamber-audit",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Internal crates
+chamber-types = { path = "chamber-types" }
+chamber-crypto = { path = "chamber-crypto" }
+chamber-state = { path = "chamber-state" }
+chamber-burn = { path = "chamber-burn" }
+chamber-policy = { path = "chamber-policy" }
+chamber-audit = { path = "chamber-audit" }
+
+# External dependencies
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+zeroize = { version = "1", features = ["derive"] }
+aes-gcm = "0.10"
+rand = "0.8"
+libc = "0.2"
+jni = "0.21"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

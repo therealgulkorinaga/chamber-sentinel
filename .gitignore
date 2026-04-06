@@ -1,0 +1,17 @@
+.DS_Store
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Rust
+rust/target/
+app/src/main/jniLibs/

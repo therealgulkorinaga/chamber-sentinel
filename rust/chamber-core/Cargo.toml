@@ -1,0 +1,20 @@
+[package]
+name = "chamber-core"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+chamber-types = { workspace = true }
+chamber-crypto = { workspace = true }
+chamber-state = { workspace = true }
+chamber-burn = { workspace = true }
+chamber-policy = { workspace = true }
+chamber-audit = { workspace = true }
+jni = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

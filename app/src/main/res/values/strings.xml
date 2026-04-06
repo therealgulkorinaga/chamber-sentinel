@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Chamber Sentinel</string>
+    <string name="integrity_notification_channel">Integrity Monitor</string>
+    <string name="integrity_notification_title">Chamber Sentinel Active</string>
+    <string name="integrity_notification_text">Integrity monitoring is running</string>
+    <string name="event_list_empty">No events recorded</string>
+    <string name="dashboard_title">Integrity Status</string>
+    <string name="status_secure">SECURE</string>
+    <string name="status_violation">VIOLATION DETECTED</string>
+</resources>

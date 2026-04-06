@@ -1,0 +1,11 @@
+[package]
+name = "chamber-state"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chamber-types = { workspace = true }
+chamber-crypto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+zeroize = { workspace = true }
