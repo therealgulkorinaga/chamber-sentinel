@@ -15,7 +15,43 @@ use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jint, jlong, jstring};
 use jni::JNIEnv;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+// ---------------------------------------------------------------------------
+// Artifact Vault — sole cross-world channel
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct Artifact {
+    pub artifact_id: ArtifactId,
+    pub source_world_id: WorldId,
+    pub artifact_class: String,
+    pub payload: serde_json::Value,
+    pub sealed_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArtifactVault {
+    artifacts: Arc<Mutex<Vec<Artifact>>>,
+}
+
+impl ArtifactVault {
+    pub fn new() -> Self {
+        Self { artifacts: Arc::new(Mutex::new(Vec::new())) }
+    }
+    pub fn store(&self, artifact: Artifact) {
+        self.artifacts.lock().unwrap().push(artifact);
+    }
+    pub fn artifact_count_for_world(&self, world_id: WorldId) -> usize {
+        self.artifacts.lock().unwrap().iter().filter(|a| a.source_world_id == world_id).count()
+    }
+    pub fn artifacts_from_world(&self, world_id: WorldId) -> Vec<Artifact> {
+        self.artifacts.lock().unwrap().iter().filter(|a| a.source_world_id == world_id).cloned().collect()
+    }
+    pub fn all_artifacts(&self) -> Vec<Artifact> {
+        self.artifacts.lock().unwrap().clone()
+    }
+}
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -25,16 +61,18 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The Chamber Sentinel substrate runtime.
 /// Owns all engines, manages world lifecycle.
-struct Runtime {
-    crypto: Arc<CryptoProvider>,
-    state: Arc<StateEngine>,
-    policy: Arc<PolicyEngine>,
-    burn: BurnEngine,
-    audit: Arc<AuditLog>,
+pub struct Runtime {
+    pub crypto: Arc<CryptoProvider>,
+    pub state_engine: Arc<StateEngine>,
+    pub policy: Arc<PolicyEngine>,
+    pub burn_engine: BurnEngine,
+    pub audit: Arc<AuditLog>,
     /// Maps world_id -> (grammar_id, phase)
-    worlds: HashMap<WorldId, WorldMeta>,
+    pub worlds: HashMap<WorldId, WorldMeta>,
     /// Tracks frame counts per world for residue reporting
-    frame_counts: HashMap<WorldId, u64>,
+    pub frame_counts: HashMap<WorldId, u64>,
+    /// Artifact vault — sole cross-world channel
+    pub vault: ArtifactVault,
 }
 
 struct WorldMeta {
@@ -45,7 +83,7 @@ struct WorldMeta {
 }
 
 impl Runtime {
-    fn new() -> Self {
+    pub fn new() -> Self {
         // Apply process hardening on init
         chamber_crypto::mem_protect::harden_process();
 
@@ -54,7 +92,7 @@ impl Runtime {
         let state = Arc::new(StateEngine::new(crypto.clone()));
         let policy = Arc::new(PolicyEngine::new());
 
-        let burn = BurnEngine::new(crypto.clone(), state.clone(), audit.clone());
+        let burn_engine = BurnEngine::new(crypto.clone(), state.clone(), audit.clone());
 
         // Load the camera grammar
         let grammar = chamber_policy::camera_sentinel_grammar();
@@ -62,16 +100,17 @@ impl Runtime {
 
         Runtime {
             crypto,
-            state,
+            state_engine: state,
             policy,
-            burn,
+            burn_engine,
             audit,
             worlds: HashMap::new(),
             frame_counts: HashMap::new(),
+            vault: ArtifactVault::new(),
         }
     }
 
-    fn create_world(&mut self, grammar_id: &str, objective: &str) -> SubstrateResult<WorldId> {
+    pub fn create_world(&mut self, grammar_id: &str, objective: &str) -> SubstrateResult<WorldId> {
         // Verify grammar exists
         self.policy.get_grammar(grammar_id)?;
 
@@ -86,7 +125,7 @@ impl Runtime {
             })?;
 
         // Initialize encrypted state
-        self.state.create_world_state(world_id);
+        self.state_engine.create_world_state(world_id);
 
         // Record creation
         self.audit.record(
@@ -119,7 +158,7 @@ impl Runtime {
         Ok(world_id)
     }
 
-    fn submit_create_object(
+    pub fn submit_create_object(
         &mut self,
         world_id: WorldId,
         object_type: &str,
@@ -172,7 +211,7 @@ impl Runtime {
             created_at: Utc::now(),
         };
 
-        self.state.add_object(world_id, object)?;
+        self.state_engine.add_object(world_id, object)?;
 
         // Track frame counts
         if object_type == "frame" {
@@ -184,7 +223,7 @@ impl Runtime {
         Ok(object_id)
     }
 
-    fn submit_seal_artifact(
+    pub fn submit_seal_artifact(
         &self,
         world_id: WorldId,
         object_id: ObjectId,
@@ -199,10 +238,10 @@ impl Runtime {
         }
 
         // Check preservability
-        let is_preservable = self.state.is_preservable(world_id, object_id)?;
+        let is_preservable = self.state_engine.is_preservable(world_id, object_id)?;
         if !is_preservable {
             let obj_type = self
-                .state
+                .state_engine
                 .object_type(world_id, object_id)?
                 .unwrap_or_else(|| "unknown".to_string());
             return Err(SubstrateError::NotPreservable {
@@ -212,7 +251,7 @@ impl Runtime {
 
         // Check policy
         let obj_type = self
-            .state
+            .state_engine
             .object_type(world_id, object_id)?
             .unwrap_or_else(|| "unknown".to_string());
         let can_preserve = self
@@ -224,7 +263,18 @@ impl Runtime {
             });
         }
 
+        // Get the object to store in vault
+        let object = self.state_engine.with_object(world_id, object_id, |o| o.clone())?;
+
         let artifact_id = ArtifactId::new();
+        let artifact = Artifact {
+            artifact_id,
+            source_world_id: world_id,
+            artifact_class: obj_type.clone(),
+            payload: object.payload,
+            sealed_at: Utc::now(),
+        };
+        self.vault.store(artifact);
 
         self.audit.record(
             world_id,
@@ -236,7 +286,7 @@ impl Runtime {
         Ok(artifact_id)
     }
 
-    fn burn_world(
+    pub fn burn_world(
         &mut self,
         world_id: WorldId,
         mode: TerminationMode,
@@ -258,7 +308,7 @@ impl Runtime {
         meta.phase = LifecyclePhase::Terminated;
 
         // Execute 6-layer burn
-        let result = self.burn.burn_world(world_id, mode)?;
+        let result = self.burn_engine.burn_world(world_id, mode)?;
 
         // Remove from tracking
         self.frame_counts.remove(&world_id);
@@ -266,11 +316,11 @@ impl Runtime {
         Ok(result)
     }
 
-    fn get_residue_report(&self, world_id: WorldId) -> chamber_burn::SemanticResidueReport {
-        self.burn.measure_residue(world_id)
+    pub fn get_residue_report(&self, world_id: WorldId) -> chamber_burn::SemanticResidueReport {
+        self.burn_engine.measure_residue(world_id)
     }
 
-    fn ingest_frame(
+    pub fn ingest_frame(
         &mut self,
         world_id: WorldId,
         _frame_bytes: &[u8],
@@ -293,6 +343,32 @@ impl Runtime {
         })?;
 
         self.submit_create_object(world_id, "frame", &payload_str)
+    }
+
+    /// Convenience: create an object with a serde_json::Value payload.
+    pub fn create_object(
+        &mut self,
+        world_id: WorldId,
+        object_type: &str,
+        payload: serde_json::Value,
+        _preservable: bool,
+    ) -> SubstrateResult<ObjectId> {
+        let payload_str = serde_json::to_string(&payload).map_err(|e| {
+            SubstrateError::InvalidPayload {
+                object_type: object_type.to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        self.submit_create_object(world_id, object_type, &payload_str)
+    }
+
+    /// Convenience: seal an artifact (wraps submit_seal_artifact).
+    pub fn seal_artifact(
+        &self,
+        world_id: WorldId,
+        object_id: ObjectId,
+    ) -> SubstrateResult<ArtifactId> {
+        self.submit_seal_artifact(world_id, object_id)
     }
 }
 
