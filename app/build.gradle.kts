@@ -55,6 +55,12 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
     implementation("androidx.camera:camera-camera2:1.3.1")
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+}
+
+android.aaptOptions {
+    noCompress += "tflite"
 }
 
 // Rust .so is pre-built and placed in src/main/jniLibs/arm64-v8a/

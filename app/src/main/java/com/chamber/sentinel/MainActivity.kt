@@ -22,9 +22,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var runtime: ChamberRuntime
     private var cameraController: CameraController? = null
     private var frameProcessor: FrameProcessor? = null
+    private var detector: com.chamber.sentinel.detection.ObjectDetector? = null
     private var currentWorldId: String? = null
     private val handler = Handler(Looper.getMainLooper())
     private var frameCount = 0
+    private var lastFrameBytes: ByteArray? = null // Keep last frame for detection before burn
     private val CHAMBER_WINDOW_SIZE = 30 // Burn every 30 frames (1 second at 30fps)
 
     companion object {
@@ -97,6 +99,14 @@ class MainActivity : AppCompatActivity() {
         Log.i(TAG, "First chamber created: $currentWorldId")
         frameCount = 0
 
+        // Initialize object detector
+        try {
+            detector = com.chamber.sentinel.detection.ObjectDetector(this)
+            Log.i(TAG, "Object detector loaded")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load detector: ${e.message}")
+        }
+
         // Set up frame processor
         frameProcessor = FrameProcessor(runtime, object : FrameProcessor.EventCallback {
             override fun onFrameProcessed(worldId: String, objectId: String) {
@@ -132,7 +142,7 @@ class MainActivity : AppCompatActivity() {
                 setFrameCallback { data, width, height, timestamp ->
                     val wid = currentWorldId ?: return@setFrameCallback
                     frameProcessor?.processFrame(wid, data, width, height, timestamp)
-                }
+                    lastFrameBytes = data.clone()                }
                 open()
             }
             Log.i(TAG, "Camera started — processing frames into chambers")
@@ -147,21 +157,41 @@ class MainActivity : AppCompatActivity() {
         val now = System.currentTimeMillis()
         val timestampStr = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(now))
 
-        // Seal a summary event for this chamber window
-        val eventJson = """{"event_type":"motion_detected","timestamp":"$now","confidence":0.5,"duration_seconds":1}"""
+        // Run detection on the last frame before burning
+        var eventType = "motion_detected"
+        var confidence = 0.5f
+        val frameData = lastFrameBytes
+        if (frameData != null && detector != null) {
+            try {
+                val detections = detector!!.detect(frameData)
+                if (detections.isNotEmpty()) {
+                    val best = detections.maxByOrNull { it.confidence }!!
+                    eventType = best.label
+                    confidence = best.confidence
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Detection failed: ${e.message}")
+            }
+            frameData.fill(0) // Zero the frame — analyzed, now forget
+            lastFrameBytes = null
+        }
+
+        // Seal the detected event
+        val eventJson = """{"event_type":"$eventType","timestamp":"$now","confidence":$confidence,"duration_seconds":1}"""
         try {
             val eventId = runtime.createObject(oldWorldId, "event_summary", eventJson)
             runtime.sealArtifact(oldWorldId, eventId)
 
-            // Update UI — show the sealed event
+            val confidenceStr = "%.0f%%".format(confidence * 100)
+            val displayType = eventType.replace("_", " ")
             handler.post {
                 val fragment = supportFragmentManager
                     .findFragmentById(R.id.fragment_container) as? EventListFragment
                 fragment?.addEvent(AuditEvent(
                     worldId = oldWorldId,
                     timestamp = timestampStr,
-                    eventType = "Chamber burned — ${frameCount} frames destroyed",
-                    detail = "K_w destroyed. Frames unrecoverable."
+                    eventType = "$displayType ($confidenceStr)",
+                    detail = "${frameCount} frames burned"
                 ))
             }
         } catch (e: Exception) {
