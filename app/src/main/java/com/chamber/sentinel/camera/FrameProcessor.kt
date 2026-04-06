@@ -7,18 +7,15 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
-/**
- * Pipeline that receives raw camera frames from [CameraController]
- * and submits them into the Rust substrate via [ChamberRuntime].
- *
- * Frames are processed on a dedicated single-thread executor to avoid
- * blocking the camera callback thread. Back-pressure is handled by
- * dropping frames when the pipeline is busy.
- */
 class FrameProcessor(
     private val runtime: ChamberRuntime,
-    private val worldId: String,
-) : CameraController.FrameCallback {
+    private val callback: EventCallback
+) {
+    interface EventCallback {
+        fun onFrameProcessed(worldId: String, objectId: String)
+        fun onEventSealed(eventType: String, timestamp: String)
+        fun onError(error: String)
+    }
 
     private val executor: ExecutorService = Executors.newSingleThreadExecutor { r ->
         Thread(r, "FrameProcessor").apply { isDaemon = true }
@@ -28,54 +25,38 @@ class FrameProcessor(
     private val frameCount = AtomicLong(0)
     private val dropCount = AtomicLong(0)
 
-    /**
-     * Called by [CameraController] when a new frame is available.
-     * If the pipeline is already processing a frame, this one is dropped.
-     */
-    override fun onFrame(data: ByteArray, width: Int, height: Int, timestampNs: Long) {
+    companion object {
+        private const val TAG = "FrameProcessor"
+    }
+
+    fun processFrame(worldId: String, data: ByteArray, width: Int, height: Int, timestamp: Long) {
         if (!processing.compareAndSet(false, true)) {
             dropCount.incrementAndGet()
             return
         }
 
-        executor.execute {
+        executor.submit {
             try {
-                val timestampMs = timestampNs / 1_000_000
-                runtime.ingestFrame(worldId, data, width, height, timestampMs)
-                val count = frameCount.incrementAndGet()
-                if (count % 100 == 0L) {
-                    Log.d(
-                        TAG,
-                        "Processed $count frames, dropped ${dropCount.get()} " +
-                                "(${width}x${height})"
-                    )
+                val result = runtime.ingestFrame(worldId, data, width, height, timestamp)
+                if (result != null) {
+                    frameCount.incrementAndGet()
+                    callback.onFrameProcessed(worldId, result)
+
+                    if (frameCount.get() % 30 == 0L) {
+                        Log.d(TAG, "Frames: ${frameCount.get()}, dropped: ${dropCount.get()}")
+                    }
+                } else {
+                    callback.onError("Frame ingestion returned null")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to submit frame to substrate", e)
+                callback.onError("Frame processing failed: ${e.message}")
             } finally {
                 processing.set(false)
             }
         }
     }
 
-    /**
-     * Shut down the processing pipeline. Waits up to 1 second for pending work.
-     */
     fun shutdown() {
-        executor.shutdown()
-        Log.i(
-            TAG,
-            "FrameProcessor shutdown: processed=${frameCount.get()}, dropped=${dropCount.get()}"
-        )
-    }
-
-    /** Total frames successfully submitted to the substrate. */
-    val processedFrames: Long get() = frameCount.get()
-
-    /** Total frames dropped due to back-pressure. */
-    val droppedFrames: Long get() = dropCount.get()
-
-    companion object {
-        private const val TAG = "FrameProcessor"
+        executor.shutdownNow()
     }
 }

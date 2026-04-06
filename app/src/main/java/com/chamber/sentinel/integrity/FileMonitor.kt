@@ -65,12 +65,12 @@ class FileMonitor(
     }
 
     private fun handleFileEvent(dir: File, event: Int, path: String) {
-        val eventName = when (event and ALL_EVENTS_MASK) {
-            CREATE -> "CREATE"
-            MODIFY -> "MODIFY"
-            MOVED_TO -> "MOVED_TO"
-            CLOSE_WRITE -> "CLOSE_WRITE"
-            else -> "EVENT(${event and ALL_EVENTS_MASK})"
+        val eventName = when (event and FileObserver.ALL_EVENTS) {
+            FileObserver.CREATE -> "CREATE"
+            FileObserver.MODIFY -> "MODIFY"
+            FileObserver.MOVED_TO -> "MOVED_TO"
+            FileObserver.CLOSE_WRITE -> "CLOSE_WRITE"
+            else -> "EVENT(${event and FileObserver.ALL_EVENTS})"
         }
 
         // Check if the file looks like a screenshot or recording

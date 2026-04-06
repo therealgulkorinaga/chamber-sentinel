@@ -1,27 +1,38 @@
 package com.chamber.sentinel
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
 import android.view.WindowManager
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.chamber.sentinel.camera.CameraController
+import com.chamber.sentinel.camera.FrameProcessor
 import com.chamber.sentinel.ui.EventListFragment
 
-/**
- * Main (and only) activity for Chamber Sentinel.
- *
- * Enforces:
- * - FLAG_SECURE on all windows (prevents screenshots / screen recording)
- * - Fullscreen immersive mode with no system bars
- * - Portrait-only orientation (declared in manifest)
- */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var runtime: ChamberRuntime
+    private var cameraController: CameraController? = null
+    private var frameProcessor: FrameProcessor? = null
+    private var currentWorldId: String? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private var frameCount = 0
+    private val CHAMBER_WINDOW_SIZE = 30 // Burn every 30 frames (1 second at 30fps)
+
+    companion object {
+        private const val TAG = "MainActivity"
+        private const val CAMERA_PERMISSION_REQUEST = 100
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // FLAG_SECURE must be set before setContentView
         window.setFlags(
             WindowManager.LayoutParams.FLAG_SECURE,
             WindowManager.LayoutParams.FLAG_SECURE
@@ -30,28 +41,174 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Fullscreen immersive: hide both status and navigation bars
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val controller = WindowInsetsControllerCompat(window, window.decorView)
         controller.hide(WindowInsetsCompat.Type.systemBars())
         controller.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
 
-        // Initialize the Rust runtime
         runtime = ChamberRuntime.getInstance()
         runtime.initialize()
+        Log.i(TAG, "Runtime initialized: version=${runtime.version}")
 
-        // Load the event list fragment
         if (savedInstanceState == null) {
             supportFragmentManager.beginTransaction()
                 .replace(R.id.fragment_container, EventListFragment())
                 .commit()
         }
+
+        // Camera will start in onResume after the activity is fully visible
+    }
+
+    private var cameraStarted = false
+
+    private fun checkCameraPermissionAndStart() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            == PackageManager.PERMISSION_GRANTED) {
+            if (!cameraStarted) {
+                // Delay slightly to ensure we're in foreground state
+                handler.postDelayed({ startCameraProcessing() }, 500)
+            }
+        } else {
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_REQUEST)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == CAMERA_PERMISSION_REQUEST &&
+            grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            startCameraProcessing()
+        } else {
+            Log.w(TAG, "Camera permission denied — running without camera")
+        }
+    }
+
+    private fun startCameraProcessing() {
+        if (cameraStarted) return
+        cameraStarted = true
+        Log.i(TAG, "Starting camera processing")
+
+        // Create first chamber
+        currentWorldId = runtime.createWorld("camera_sentinel_v1", "Camera monitoring")
+        Log.i(TAG, "First chamber created: $currentWorldId")
+        frameCount = 0
+
+        // Set up frame processor
+        frameProcessor = FrameProcessor(runtime, object : FrameProcessor.EventCallback {
+            override fun onFrameProcessed(worldId: String, objectId: String) {
+                frameCount++
+                // Rolling chamber: burn and create new every CHAMBER_WINDOW_SIZE frames
+                if (frameCount >= CHAMBER_WINDOW_SIZE) {
+                    rollChamber()
+                }
+            }
+
+            override fun onEventSealed(eventType: String, timestamp: String) {
+                Log.i(TAG, "Event sealed: $eventType at $timestamp")
+                handler.post {
+                    val fragment = supportFragmentManager
+                        .findFragmentById(R.id.fragment_container) as? EventListFragment
+                    fragment?.addEvent(AuditEvent(
+                        worldId = currentWorldId ?: "",
+                        timestamp = timestamp,
+                        eventType = eventType,
+                        detail = ""
+                    ))
+                }
+            }
+
+            override fun onError(error: String) {
+                Log.e(TAG, "Frame processing error: $error")
+            }
+        })
+
+        // Start camera
+        try {
+            cameraController = CameraController(this).apply {
+                setFrameCallback { data, width, height, timestamp ->
+                    val wid = currentWorldId ?: return@setFrameCallback
+                    frameProcessor?.processFrame(wid, data, width, height, timestamp)
+                }
+                open()
+            }
+            Log.i(TAG, "Camera started — processing frames into chambers")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start camera: ${e.message}")
+            cameraStarted = false
+        }
+    }
+
+    private fun rollChamber() {
+        val oldWorldId = currentWorldId ?: return
+        val now = System.currentTimeMillis()
+        val timestampStr = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(now))
+
+        // Seal a summary event for this chamber window
+        val eventJson = """{"event_type":"motion_detected","timestamp":"$now","confidence":0.5,"duration_seconds":1}"""
+        try {
+            val eventId = runtime.createObject(oldWorldId, "event_summary", eventJson)
+            runtime.sealArtifact(oldWorldId, eventId)
+
+            // Update UI — show the sealed event
+            handler.post {
+                val fragment = supportFragmentManager
+                    .findFragmentById(R.id.fragment_container) as? EventListFragment
+                fragment?.addEvent(AuditEvent(
+                    worldId = oldWorldId,
+                    timestamp = timestampStr,
+                    eventType = "Chamber burned — ${frameCount} frames destroyed",
+                    detail = "K_w destroyed. Frames unrecoverable."
+                ))
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to seal event: ${e.message}")
+        }
+
+        // Burn the old chamber
+        try {
+            runtime.burn(oldWorldId, "AutoBurn")
+            Log.i(TAG, "Chamber burned")
+        } catch (e: Exception) {
+            Log.e(TAG, "Burn failed: ${e.message}")
+        }
+
+        // Create new chamber
+        currentWorldId = runtime.createWorld("camera_sentinel_v1", "Camera monitoring")
+        frameCount = 0
+        Log.i(TAG, "New chamber: $currentWorldId")
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Don't start camera here — use onWindowFocusChanged instead
+        // which fires after the window is fully visible and the process
+        // is in foreground state
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            checkCameraPermissionAndStart()
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        cameraController?.close()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        // Zeroize all Rust state when the activity is fully destroyed
+        cameraController?.close()
+        // Burn any active chamber
+        currentWorldId?.let { wid ->
+            runtime.burn(wid, "AutoBurn")
+            Log.i(TAG, "Final chamber burned on destroy")
+        }
         if (isFinishing) {
             runtime.destroy()
         }
